@@ -1,0 +1,345 @@
+"use client";
+
+import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth } from "../../../lib/firebaseConfig";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+export default function DocMode() {
+  const [user, setUser] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [availableVoices, setAvailableVoices] = useState([]);
+  const [selectedVoice, setSelectedVoice] = useState(null);
+  const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
+  const recognitionRef = useRef(null);
+  const router = useRouter();
+
+  // Auth check
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currUser) => {
+      if (!currUser) router.push("/login");
+      else setUser(currUser);
+    });
+    return () => unsubscribe();
+  }, [router]);
+
+  // Load voices
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const updateVoices = () => {
+        const voices = window.speechSynthesis.getVoices();
+        const indianVoices = voices.filter(
+          (v) =>
+            v.lang.toLowerCase() === "en-in" &&
+            (v.name.toLowerCase().includes("male") ||
+              v.name.toLowerCase().includes("female") ||
+              v.name.toLowerCase().includes("ravi") ||
+              v.name.toLowerCase().includes("heera"))
+        );
+        setAvailableVoices(indianVoices);
+        setSelectedVoice(indianVoices[0] || voices[0]);
+      };
+      updateVoices();
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+  }, []);
+
+  // Voice input
+  const startListening = () => {
+    if (!("webkitSpeechRecognition" in window)) {
+      alert("Speech recognition not supported.");
+      return;
+    }
+    const recognition = new window.webkitSpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = false;
+    recognition.onresult = (e) => setInput(e.results[0][0].transcript);
+    recognition.start();
+    recognitionRef.current = recognition;
+  };
+
+  // Voice output
+  const speakText = (text) => {
+    if (!text || !selectedVoice) return;
+    window.speechSynthesis.cancel();
+    setIsPaused(false);
+    const sanitized = text.replace(/```[\s\S]*?```/g, " code ").replace(/[*_`#]/g, "");
+    const utter = new SpeechSynthesisUtterance(sanitized);
+    utter.voice = selectedVoice;
+    utter.lang = selectedVoice.lang || "en-IN";
+    utter.pitch = 1;
+    utter.rate = 1;
+    utter.onstart = () => setShowVoiceDropdown(true);
+    utter.onend = () => setShowVoiceDropdown(false);
+    window.speechSynthesis.speak(utter);
+  };
+
+  const togglePause = () => {
+    if (!window.speechSynthesis.speaking) return;
+    if (isPaused) window.speechSynthesis.resume();
+    else window.speechSynthesis.pause();
+    setIsPaused(!isPaused);
+  };
+
+  // File Upload
+  const handleFileUpload = async (event, type) => {
+    const files = Array.from(event.target.files);
+    if (!files.length) return;
+
+    setUploading(true);
+    setToast(`Processing ${type}...`);
+
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("action", "extract");
+
+    try {
+      const res = await fetch("/api/doc", { method: "POST", body: formData });
+      const data = await res.json();
+      if (Array.isArray(data.files) && data.files.every(f => f.status === "processed")) {
+        setToast(`${type} uploaded successfully!`);
+      } else {
+        setToast(`Error uploading ${type}`);
+      }
+    } catch (err) {
+      console.error(err);
+      setToast(`Upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+      setTimeout(() => setToast(null), 2500);
+      setShowDropdown(false);
+    }
+  };
+
+  // Send query
+  const handleSend = async (e) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    const newMsg = { role: "user", content: input };
+    const updated = [...messages, newMsg];
+    setMessages(updated);
+    setInput("");
+    setLoading(true);
+
+    const processingMsg = { role: "assistant", content: "Processing your query..." };
+    setMessages((prev) => [...prev, processingMsg]);
+
+    try {
+      const res = await fetch("/api/doc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: updated }),
+      });
+      const data = await res.json();
+      setMessages((prev) => prev.filter((m) => m !== processingMsg));
+
+      const reply = data.answer || "No response.";
+      const contextInfo = data.used_context ? "(Used document context)" : "(No context found)";
+      setMessages((prev) => [...prev, { role: "assistant", content: `${reply}\n${contextInfo}` }]);
+      speakText(reply);
+    } catch (err) {
+      console.error(err);
+      setMessages((prev) => prev.filter((m) => m !== processingMsg));
+      setMessages((prev) => [...prev, { role: "assistant", content: "Error occurred." }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    router.push("/login");
+  };
+
+  return (
+    <div className="flex h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-purple-900 text-white">
+      {/* Sidebar */}
+      <aside className="fixed top-0 left-0 h-full bg-black w-64 p-4 flex flex-col shadow-lg">
+        <div className="flex-1 overflow-y-auto mt-3">
+          <h3 className="text-sm text-gray-400 mb-2">Document Sessions</h3>
+          <p className="text-gray-500 text-sm">No uploads yet...</p>
+        </div>
+        {user && (
+          <div className="border-t border-gray-700 pt-3">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-yellow-500 text-black flex items-center justify-center font-bold">
+                {user.email?.charAt(0).toUpperCase()}
+              </div>
+              <div className="text-sm truncate">{user.email}</div>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="w-full bg-red-500 py-2 rounded hover:bg-red-600"
+            >
+              Logout
+            </button>
+          </div>
+        )}
+      </aside>
+
+      {/* Main Chat */}
+      <div className="flex-1 flex flex-col ml-64">
+        <header className="flex items-center justify-between px-4 py-3 bg-black/70 backdrop-blur-md shadow">
+          <div className="flex items-center gap-3">
+            <img src="/icon.png" alt="Logo" className="w-10 h-10" />
+            <h1 className="text-2xl font-bold text-yellow-400">Doc Mode</h1>
+          </div>
+          <button
+            onClick={() => router.push("/dashboard")}
+            className="text-sm text-yellow-400 hover:underline"
+          >
+            Back to Dashboard
+          </button>
+        </header>
+
+        {/* Chat Area */}
+        <main className="flex-1 overflow-y-auto p-6 space-y-4">
+          {messages.length === 0 && !loading && (
+            <div className="text-gray-300 text-center mt-20">
+              Upload a document or ask a question!
+            </div>
+          )}
+
+          {messages.map((msg, i) => (
+            <div
+              key={i}
+              className={`p-4 rounded-lg max-w-2xl ${
+                msg.role === "user" ? "bg-purple-600 ml-auto" : "bg-gray-700 mr-auto"
+              } relative`}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+
+              {msg.role === "assistant" && (
+                <div className="absolute bottom-2 right-2 flex gap-2">
+                  <button
+                    onClick={() => speakText(msg.content)}
+                    className="bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded"
+                  >
+                    🔊
+                  </button>
+                  <button
+                    onClick={togglePause}
+                    className="bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded"
+                  >
+                    {isPaused ? "▶️" : "⏸️"}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {loading && (
+            <div className="p-3 rounded-lg max-w-lg bg-gray-600 mr-auto">
+              Processing...
+            </div>
+          )}
+        </main>
+
+        {/* Input Bar */}
+        <form
+          onSubmit={handleSend}
+          className="p-4 bg-black flex gap-3 border-t border-gray-800 items-center relative"
+        >
+          {/* + button */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowDropdown(!showDropdown)}
+              className="px-3 py-2 bg-gray-700 rounded hover:bg-gray-600"
+            >
+              ➕
+            </button>
+            {showDropdown && (
+              <div className="absolute bottom-12 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg w-36 z-50">
+                <label className="block px-4 py-2 hover:bg-gray-700 cursor-pointer">
+                  📄 Upload File
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.pptx"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => handleFileUpload(e, "file")}
+                  />
+                </label>
+                <label className="block px-4 py-2 hover:bg-gray-700 cursor-pointer">
+                  🖼️ Upload Image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => handleFileUpload(e, "image")}
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* 🎤 button */}
+          <button
+            type="button"
+            onClick={startListening}
+            className="px-3 py-2 bg-gray-700 rounded hover:bg-gray-600"
+          >
+            🎤
+          </button>
+
+          {/* Input field */}
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={uploading}
+            className="flex-1 px-4 py-3 rounded-lg bg-gray-800 text-white border border-gray-600"
+            placeholder={uploading ? "Wait for upload..." : "Ask based on uploaded docs..."}
+          />
+
+          {/* Send */}
+          <button
+            type="submit"
+            className="px-6 py-3 rounded-lg bg-yellow-500 text-black font-semibold hover:bg-yellow-600 transition"
+            disabled={uploading}
+          >
+            Send
+          </button>
+        </form>
+
+        {/* Voice Selector */}
+        {showVoiceDropdown && (
+          <div className="fixed bottom-24 right-6 z-50">
+            <select
+              value={selectedVoice?.name || ""}
+              onChange={(e) =>
+                setSelectedVoice(availableVoices.find((v) => v.name === e.target.value))
+              }
+              className="bg-gray-800 text-white border border-gray-600 rounded px-2 py-1"
+            >
+              {availableVoices.map((voice, idx) => (
+                <option key={idx} value={voice.name}>
+                  {voice.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Toast */}
+        {toast && (
+          <div className="fixed bottom-12 right-1/2 translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg transition-all">
+            {toast}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

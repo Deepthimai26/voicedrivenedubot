@@ -1,0 +1,21 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Alan+Sans:wght@300..900&display=swap');
+
+
+body {
+  font-family: "Alan Sans", sans-serif;
+}
+
+
+
+@layer utilities {
+  .clip-ellipse {
+    clip-path: ellipse(70% 60% at 50% 50%);
+  }
+  .clip-circle {
+    clip-path: circle(50% at 50% 50%);
+  }
+  .clip-diagonal {
+    clip-path: polygon(0 0, 100% 10%, 100% 90%, 0 100%);
+  }
+}
